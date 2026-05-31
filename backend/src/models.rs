@@ -515,6 +515,25 @@ pub struct UserProfile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserPreferences {
+    pub id: String,
+    pub user_id: String,
+    pub preferences: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileActivity {
+    pub id: String,
+    pub user_id: String,
+    pub activity_type: String,
+    pub description: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildTransactionDto {
     pub contract_id: String,
     pub method: String,

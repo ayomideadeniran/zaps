@@ -7,6 +7,7 @@ use crate::{
     },
     service::MetricsService,
 };
+use chrono::Timelike;
 use deadpool_postgres::Pool;
 use serde::Deserialize;
 use serde_json::json;

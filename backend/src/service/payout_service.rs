@@ -6,6 +6,7 @@ use crate::{
 use chrono::{Duration, Utc};
 use deadpool_postgres::Pool;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -80,7 +81,7 @@ impl PayoutService {
             amount: row.get(3),
             currency: row.get(4),
             destination_address: row.get(5),
-            status: PayoutStatus::from_str(row.get::<_, String>(6)).unwrap(),
+            status: PayoutStatus::from_str(&row.get::<_, String>(6)).unwrap(),
             tx_hash: row.get(7),
             failure_reason: row.get(8),
             retry_count: row.get(9),
@@ -159,7 +160,7 @@ impl PayoutService {
             total_amount: batch_row.get(2),
             currency: batch_row.get(3),
             payout_count: batch_row.get(4),
-            status: PayoutStatus::from_str(batch_row.get::<_, String>(5)).unwrap(),
+            status: PayoutStatus::from_str(&batch_row.get::<_, String>(5)).unwrap(),
             scheduled_at: batch_row.get::<_, chrono::DateTime<chrono::Utc>>(6),
             processed_at: batch_row.get(7),
             created_at: batch_row.get::<_, chrono::DateTime<chrono::Utc>>(8),
@@ -191,7 +192,7 @@ impl PayoutService {
             amount: row.get(3),
             currency: row.get(4),
             destination_address: row.get(5),
-            status: PayoutStatus::from_str(row.get::<_, String>(6)).unwrap(),
+            status: PayoutStatus::from_str(&row.get::<_, String>(6)).unwrap(),
             tx_hash: row.get(7),
             failure_reason: row.get(8),
             retry_count: row.get(9),
@@ -268,7 +269,7 @@ impl PayoutService {
                 amount: row.get(3),
                 currency: row.get(4),
                 destination_address: row.get(5),
-                status: PayoutStatus::from_str(row.get::<_, String>(6)).unwrap(),
+                status: PayoutStatus::from_str(&row.get::<_, String>(6)).unwrap(),
                 tx_hash: row.get(7),
                 failure_reason: row.get(8),
                 retry_count: row.get(9),
@@ -321,7 +322,7 @@ impl PayoutService {
             total_amount: row.get(2),
             currency: row.get(3),
             payout_count: row.get(4),
-            status: PayoutStatus::from_str(row.get::<_, String>(5)).unwrap(),
+            status: PayoutStatus::from_str(&row.get::<_, String>(5)).unwrap(),
             scheduled_at: row.get::<_, chrono::DateTime<chrono::Utc>>(6),
             processed_at: row.get(7),
             created_at: row.get::<_, chrono::DateTime<chrono::Utc>>(8),

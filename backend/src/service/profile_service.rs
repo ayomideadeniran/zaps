@@ -1,4 +1,4 @@
-use crate::{api_error::ApiError, config::Config, models::UserProfile};
+use crate::{api_error::ApiError, config::Config, models::{UserProfile, UserPreferences, ProfileActivity}};
 use deadpool_postgres::Pool;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -209,9 +209,8 @@ impl ProfileService {
         let client = self.db_pool.get().await?;
         let stmt = client
             .prepare(
-                "UPDATE user_profiles SET avatar_url = 
-}
- WHERE user_id = $2
+                "UPDATE user_profiles SET avatar_url = $1, updated_at = NOW()
+                 WHERE user_id = $2
                  RETURNING id, user_id, display_name, avatar_url, bio, country, metadata, verification_status, created_at, updated_at",
             )
             .await?;
@@ -246,9 +245,8 @@ impl ProfileService {
         let client = self.db_pool.get().await?;
         let stmt = client
             .prepare(
-                "UPDATE user_profiles SET verification_status = 
-}
- WHERE user_id = $2
+                "UPDATE user_profiles SET verification_status = $1, updated_at = NOW()
+                 WHERE user_id = $2
                  RETURNING id, user_id, display_name, avatar_url, bio, country, metadata, verification_status, created_at, updated_at",
             )
             .await?;
@@ -279,9 +277,7 @@ impl ProfileService {
         let client = self.db_pool.get().await?;
         let stmt = client
             .prepare(
-                "SELECT id, user_id, preferences, created_at, updated_at FROM user_preferences WHERE user_id = 
-}
-",
+                "SELECT id, user_id, preferences, created_at, updated_at FROM user_preferences WHERE user_id = $1",
             )
             .await?;
 
@@ -309,9 +305,7 @@ impl ProfileService {
         let stmt = client
             .prepare(
                 "INSERT INTO user_preferences (user_id, preferences)
-                 VALUES (
-}
-, $2)
+                 VALUES ($1, $2)
                  ON CONFLICT (user_id)
                  DO UPDATE SET preferences = EXCLUDED.preferences, updated_at = NOW()
                  RETURNING id, user_id, preferences, created_at, updated_at",
@@ -342,9 +336,7 @@ impl ProfileService {
         let client = self.db_pool.get().await?;
 
         let count_stmt = client
-            .prepare("SELECT COUNT(*) FROM profile_activity WHERE user_id = 
-}
-")
+            .prepare("SELECT COUNT(*) FROM profile_activity WHERE user_id = $1")
             .await?;
         let total: i64 = client
             .query_one(&count_stmt, &[&user_id])
@@ -354,9 +346,7 @@ impl ProfileService {
         let stmt = client
             .prepare(
                 "SELECT id, user_id, activity_type, description, metadata, created_at
-                 FROM profile_activity WHERE user_id = 
-}
-
+                 FROM profile_activity WHERE user_id = $1
                  ORDER BY created_at DESC LIMIT $2 OFFSET $3",
             )
             .await?;
@@ -364,7 +354,7 @@ impl ProfileService {
         let rows = client.query(&stmt, &[&user_id, &limit, &offset]).await?;
 
         let activities = rows
-            .iter()
+            .into_iter()
             .map(|row| ProfileActivity {
                 id: row.get::<_, Uuid>(0).to_string(),
                 user_id: row.get::<_, Uuid>(1).to_string(),
@@ -390,9 +380,7 @@ impl ProfileService {
         let stmt = client
             .prepare(
                 "INSERT INTO profile_activity (user_id, activity_type, description, metadata)
-                 VALUES (
-}
-, $2, $3, $4)
+                 VALUES ($1, $2, $3, $4)
                  RETURNING id, user_id, activity_type, description, metadata, created_at",
             )
             .await?;

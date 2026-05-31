@@ -337,7 +337,6 @@ impl AuditService {
 
         Ok(count)
     }
-}
 
     /// Archive old audit logs (older than retention period)
     pub async fn archive_old_logs(&self, retention_days: i64) -> Result<u64, ApiError> {

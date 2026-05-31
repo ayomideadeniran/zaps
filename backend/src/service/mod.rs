@@ -93,7 +93,7 @@ impl ServiceContainer {
         let bridge = BridgeService::new(db_pool.clone(), config.clone());
         let anchor = AnchorService::new(db_pool.clone(), config.clone());
         let compliance = ComplianceService::new(db_pool.clone(), config.clone());
-        let currency = CurrencyService::new((*db_pool).clone(), config.clone());
+        let currency = CurrencyService::new(db_pool.clone(), config.clone());
         let analytics = AnalyticsService::new((*db_pool).clone(), config.clone());
         let reconciliation = ReconciliationService::new((*db_pool).clone(), config.clone());
         let audit = AuditService::new(db_pool.clone(), config.clone());
