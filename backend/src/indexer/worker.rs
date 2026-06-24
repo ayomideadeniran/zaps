@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::{env, error::Error, time::Duration};
 use uuid::Uuid;
 
@@ -26,6 +26,7 @@ pub async fn run(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("Starting Stellar event indexer background worker...");
 
+    // AC3: On boot, read latest checkpoint from DB to resume where we left off.
     let mut cursor = load_or_initialize_cursor(&pool).await?;
     let mut backoff_attempt = 0usize;
 
@@ -35,30 +36,39 @@ pub async fn run(
                 backoff_attempt = 0;
                 let mut next_cursor = cursor;
 
-                for event in events {
-                    if let Some(payment_event) = extract_social_payment_event(&event) {
-                        if let Err(err) = process_social_payment_event(payment_event, &pool).await {
-                            tracing::warn!("Failed to process Stellar payment event: {err}");
-                        }
-                    }
-
+                for event in &events {
                     if let Some(ledger) = event.get("ledger").and_then(Value::as_u64) {
                         next_cursor = next_cursor.max(ledger as i64);
                     }
                 }
-
                 if latest_ledger > 0 {
                     next_cursor = next_cursor.max(latest_ledger as i64);
                 }
-
-                if next_cursor > cursor {
-                    cursor = next_cursor;
-                    persist_cursor(&pool, cursor).await?;
-                    tracing::debug!("Indexer cursor advanced to ledger {cursor}");
-                } else {
-                    cursor += 1;
-                    persist_cursor(&pool, cursor).await?;
+                if next_cursor <= cursor {
+                    next_cursor = cursor + 1;
                 }
+
+                // AC1 + AC2: Open one transaction; write all events AND the new
+                // checkpoint inside it so they commit or roll back atomically.
+                let mut tx = pool.begin().await?;
+
+                for event in &events {
+                    if let Some(payment_event) = extract_social_payment_event(event) {
+                        if let Err(err) =
+                            process_social_payment_event(payment_event, &pool, &mut tx).await
+                        {
+                            tracing::warn!("Failed to process Stellar payment event: {err}");
+                        }
+                    }
+                }
+
+                // AC1: Persist the new ledger checkpoint inside the same transaction.
+                persist_cursor(&mut tx, next_cursor).await?;
+
+                tx.commit().await?;
+
+                cursor = next_cursor;
+                tracing::debug!("Indexer cursor advanced to ledger {cursor}");
 
                 tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
             }
@@ -72,9 +82,12 @@ pub async fn run(
     }
 }
 
+/// Process a single payment event within the provided transaction.
+/// Taking `&mut Transaction` ensures this write is part of the caller's atomic scope.
 pub async fn process_social_payment_event(
     event: SocialPaymentEvent,
     pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let sender_id = get_or_create_user_id(&event.sender, pool).await?;
     let receiver_id = get_or_create_user_id(&event.receiver, pool).await?;
@@ -93,7 +106,7 @@ pub async fn process_social_payment_event(
     .bind("NGN")
     .bind(&event.memo)
     .bind(event.visibility.to_uppercase())
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     Ok(())
@@ -165,6 +178,8 @@ fn compute_backoff_delay(attempt: usize) -> Duration {
     candidate.min(MAX_BACKOFF)
 }
 
+/// AC3: Read latest ledger checkpoint from DB on startup. Inserts a zero-value
+/// row if this is the first time the indexer has ever run.
 async fn load_or_initialize_cursor(pool: &PgPool) -> Result<i64, Box<dyn Error + Send + Sync>> {
     let existing = sqlx::query_scalar::<_, i64>(
         "SELECT last_ledger_sequence FROM indexer_state WHERE key = $1",
@@ -174,6 +189,7 @@ async fn load_or_initialize_cursor(pool: &PgPool) -> Result<i64, Box<dyn Error +
     .await?;
 
     if let Some(cursor) = existing {
+        tracing::info!("Resuming indexer from ledger checkpoint {cursor}");
         return Ok(cursor);
     }
 
@@ -185,16 +201,26 @@ async fn load_or_initialize_cursor(pool: &PgPool) -> Result<i64, Box<dyn Error +
     .execute(pool)
     .await?;
 
+    tracing::info!("No prior checkpoint found; indexer starting from ledger 0");
     Ok(0)
 }
 
-async fn persist_cursor(pool: &PgPool, ledger: i64) -> Result<(), Box<dyn Error + Send + Sync>> {
+/// AC1 + AC2: Upsert the ledger checkpoint. Must be called with an active
+/// transaction so the update is atomic with the event writes.
+async fn persist_cursor(
+    tx: &mut Transaction<'_, Postgres>,
+    ledger: i64,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     sqlx::query(
-        "INSERT INTO indexer_state (key, last_ledger_sequence, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (key) DO UPDATE SET last_ledger_sequence = EXCLUDED.last_ledger_sequence, updated_at = NOW()",
+        "INSERT INTO indexer_state (key, last_ledger_sequence, updated_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (key) DO UPDATE
+         SET last_ledger_sequence = EXCLUDED.last_ledger_sequence,
+             updated_at = NOW()",
     )
     .bind(INDEXER_CURSOR_KEY)
     .bind(ledger)
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     Ok(())
@@ -204,8 +230,9 @@ fn extract_social_payment_event(value: &Value) -> Option<SocialPaymentEvent> {
     let sender = find_nested_string(value, "sender")?;
     let receiver = find_nested_string(value, "receiver")?;
     let amount = find_nested_i64(value, "amount")?;
-    let memo = find_nested_string(value, "memo").unwrap_or_else(|| "".to_string());
-    let visibility = find_nested_string(value, "visibility").unwrap_or_else(|| "PUBLIC".to_string());
+    let memo = find_nested_string(value, "memo").unwrap_or_default();
+    let visibility =
+        find_nested_string(value, "visibility").unwrap_or_else(|| "PUBLIC".to_string());
     let tx_hash = find_nested_string(value, "tx_hash")
         .or_else(|| find_nested_string(value, "txHash"))
         .or_else(|| find_nested_string(value, "transactionHash"))
@@ -223,11 +250,17 @@ fn extract_social_payment_event(value: &Value) -> Option<SocialPaymentEvent> {
 
 fn find_nested_string(value: &Value, key: &str) -> Option<String> {
     match value {
-        Value::Object(map) => map.get(key).and_then(|item| match item {
-            Value::String(text) => Some(text.clone()),
-            Value::Number(number) => Some(number.to_string()),
-            _ => None,
-        }).or_else(|| map.values().find_map(|nested| find_nested_string(nested, key))),
+        Value::Object(map) => map
+            .get(key)
+            .and_then(|item| match item {
+                Value::String(text) => Some(text.clone()),
+                Value::Number(number) => Some(number.to_string()),
+                _ => None,
+            })
+            .or_else(|| {
+                map.values()
+                    .find_map(|nested| find_nested_string(nested, key))
+            }),
         Value::Array(items) => items.iter().find_map(|item| find_nested_string(item, key)),
         _ => None,
     }
@@ -235,11 +268,17 @@ fn find_nested_string(value: &Value, key: &str) -> Option<String> {
 
 fn find_nested_i64(value: &Value, key: &str) -> Option<i64> {
     match value {
-        Value::Object(map) => map.get(key).and_then(|item| match item {
-            Value::Number(number) => number.as_i64(),
-            Value::String(text) => text.parse::<i64>().ok(),
-            _ => None,
-        }).or_else(|| map.values().find_map(|nested| find_nested_i64(nested, key))),
+        Value::Object(map) => map
+            .get(key)
+            .and_then(|item| match item {
+                Value::Number(number) => number.as_i64(),
+                Value::String(text) => text.parse::<i64>().ok(),
+                _ => None,
+            })
+            .or_else(|| {
+                map.values()
+                    .find_map(|nested| find_nested_i64(nested, key))
+            }),
         Value::Array(items) => items.iter().find_map(|item| find_nested_i64(item, key)),
         _ => None,
     }
@@ -285,7 +324,10 @@ mod tests {
         let filter = &params[0]["filters"][0];
 
         assert_eq!(filter["contractIds"][0].as_str(), Some("CAKE"));
-        assert_eq!(filter["topics"][0][0]["value"].as_str(), Some("SocialPaymentEvent"));
+        assert_eq!(
+            filter["topics"][0][0]["value"].as_str(),
+            Some("SocialPaymentEvent")
+        );
     }
 
     #[test]
