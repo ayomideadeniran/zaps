@@ -1,47 +1,38 @@
 name: CI - Backend
 
 on:
-  push:
-    branches: [ '**' ]
   pull_request:
-    branches: [ '**' ]
+    branches: [main, master]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/ci-backend.yml'
 
 jobs:
-  build-backend:
-    name: Build & Test Backend
+  ci:
+    name: Build, Lint & Test
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: backend
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          components: rustfmt, clippy
 
-      - name: Cache cargo target
-        uses: actions/cache@v4
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: backend/target
-          key: ${{ runner.os }}-cargo-target-${{ hashFiles('backend/Cargo.lock') }}
+          workspaces: backend
 
-      - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
-      - name: Build backend
-        run: |
-          cargo build -p zaps-backend --locked
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Run backend tests
-        run: |
-          cargo test -p zaps-backend --locked
+      - name: Tests
+        run: cargo test --all-features
