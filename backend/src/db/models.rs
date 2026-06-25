@@ -65,3 +65,28 @@ pub struct BridgeTransaction {
     pub created_at: NaiveDateTime,
     pub updated_at: NaiveDateTime,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UserYieldBalance {
+    pub user_id: Uuid,
+    pub available_balance: i64,
+    pub earning_balance: i64,
+    pub updated_at: NaiveDateTime,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct YieldTransaction {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub tx_hash: String,
+    pub r#type: String, // "DEPOSIT", "WITHDRAW", "EARNED"
+    pub amount: i64,
+    pub created_at: NaiveDateTime,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct YieldRateHistory {
+    pub id: Uuid,
+    pub apy: i32,
+    pub created_at: NaiveDateTime,
+}

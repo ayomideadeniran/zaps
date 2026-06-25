@@ -4,6 +4,9 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::{env, error::Error, time::Duration};
 use uuid::Uuid;
 
+use super::parser::{parse_zaps_event, ZapsEvent};
+use crate::db::r#yield::{process_yield_deposit_tx, process_yield_withdrawal_tx, log_yield_rate_update};
+
 const INDEXER_CURSOR_KEY: &str = "stellar_event_cursor";
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
@@ -53,11 +56,53 @@ pub async fn run(
                 let mut tx = pool.begin().await?;
 
                 for event in &events {
-                    if let Some(payment_event) = extract_social_payment_event(event) {
-                        if let Err(err) =
-                            process_social_payment_event(payment_event, &pool, &mut tx).await
-                        {
-                            tracing::warn!("Failed to process Stellar payment event: {err}");
+                    // Try to extract topic from event. Soroban RPC typically returns topics as an array of XDR strings, 
+                    // but since the existing code uses `find_nested_string`, we'll try to guess the event type 
+                    // or assume the topic is available in the payload somehow (e.g. decoded by a proxy or we check fields).
+                    // For now, we will use a heuristic: if it has "apy", it's YieldRateUpdated.
+                    // Otherwise we try extracting topic.
+                    
+                    let topic_hint = super::parser::find_nested_string(event, "topic_symbol")
+                        .or_else(|| super::parser::find_nested_string(event, "event_type"));
+                    
+                    let guessed_topic = if let Some(t) = topic_hint {
+                        t
+                    } else if super::parser::find_nested_i64(event, "apy").is_some() {
+                        "YieldRateUpdated".to_string()
+                    } else if super::parser::find_nested_string(event, "sender").is_some() {
+                        "SocialPaymentEvent".to_string()
+                    } else if let Some(t) = super::parser::find_nested_string(event, "type") {
+                        t // maybe type="DEPOSIT" etc.
+                    } else {
+                        "".to_string()
+                    };
+
+                    match parse_zaps_event(&guessed_topic, event) {
+                        ZapsEvent::YieldDeposited(e) => {
+                            let user_id = get_or_create_user_id(&e.address, &pool).await.unwrap_or_else(|_| Uuid::new_v4());
+                            if let Err(err) = process_yield_deposit_tx(&mut tx, user_id, e.amount, &e.tx_hash).await {
+                                tracing::warn!("Failed to process YieldDeposited event: {err}");
+                            }
+                        }
+                        ZapsEvent::YieldWithdrawn(e) => {
+                            let user_id = get_or_create_user_id(&e.address, &pool).await.unwrap_or_else(|_| Uuid::new_v4());
+                            if let Err(err) = process_yield_withdrawal_tx(&mut tx, user_id, e.amount, &e.tx_hash).await {
+                                tracing::warn!("Failed to process YieldWithdrawn event: {err}");
+                            }
+                        }
+                        ZapsEvent::YieldRateUpdated(e) => {
+                            if let Err(err) = log_yield_rate_update(&pool, e.apy).await {
+                                tracing::warn!("Failed to process YieldRateUpdated event: {err}");
+                            }
+                        }
+                        ZapsEvent::Unknown => {
+                            if let Some(payment_event) = extract_social_payment_event(event) {
+                                if let Err(err) =
+                                    process_social_payment_event(payment_event, &pool, &mut tx).await
+                                {
+                                    tracing::warn!("Failed to process Stellar payment event: {err}");
+                                }
+                            }
                         }
                     }
                 }
@@ -149,16 +194,19 @@ async fn poll_soroban_events(
 }
 
 fn build_get_events_payload(start_ledger: i64, contract_id: Option<&str>) -> Value {
-    let mut filters = vec![json!({
-        "topics": [[{ "type": "symbol", "value": "SocialPaymentEvent" }]]
-    })];
+    let mut filters = vec![
+        json!({ "topics": [[{ "type": "symbol", "value": "SocialPaymentEvent" }]] }),
+        json!({ "topics": [[{ "type": "symbol", "value": "YieldDeposited" }]] }),
+        json!({ "topics": [[{ "type": "symbol", "value": "YieldWithdrawn" }]] }),
+        json!({ "topics": [[{ "type": "symbol", "value": "YieldRateUpdated" }]] }),
+    ];
 
     if let Some(contract_id) = contract_id.filter(|value| !value.is_empty()) {
-        let contract_filter = json!({
-            "contractIds": [contract_id],
-            "topics": [[{ "type": "symbol", "value": "SocialPaymentEvent" }]]
-        });
-        filters[0] = contract_filter;
+        for filter in &mut filters {
+            if let Some(obj) = filter.as_object_mut() {
+                obj.insert("contractIds".to_string(), json!([contract_id]));
+            }
+        }
     }
 
     json!({
